@@ -12,43 +12,78 @@ import "@aws-amplify/ui-react/styles.css";
 
 Amplify.configure(outputs);
 
-const client = generateClient<Schema>();
+const client = generateClient<Schema>({
+  authMode:'userPool',
+});
 
 export default function App() {
   const [todos, setTodos] = useState<Array<Schema["Todo"]["type"]>>([]);
     
   const {user, signOut } = useAuthenticator();
 
-function listTodos() {
-  // Use observeQuery without manual filtering - let Amplify's allow.owner() handle it
-  // The allow.owner() rule should automatically filter to only show current user's todos
-  client.models.Todo.observeQuery().subscribe({
-    next: (data) => {
-      console.log("User:", user?.signInDetails?.loginId);
-      console.log("Todos received:", data.items);
-      data.items.forEach(todo => {
-        console.log("Todo content:", todo.content, "User:", todo.user);
-      });
-      setTodos([...data.items]);
-    },
-    error: (error) => {
-      console.error("Error fetching todos:", error);
-    }
-  });
-}
-
   function deleteTodo(id: string){
     client.models.Todo.delete({id}).then(() => {
       console.log("Todo deleted:", id);
+      // Explicitly refresh the list after deletion
+      refreshTodos();
     }).catch((error) => {
       console.error("Error deleting todo:", error);
     });
   }
 
+  // Function to explicitly refresh todos
+  function refreshTodos() {
+    if (!user) return;
+    console.log("Refreshing todos...");
+    client.models.Todo.list({
+      filter: {
+        user: {
+          eq: user.signInDetails?.loginId
+        }
+      }
+    }).then((result) => {
+      console.log("Todos refreshed:", result.data);
+      setTodos([...result.data]);
+    }).catch((error) => {
+      console.error("Error refreshing todos:", error);
+    });
+  }
+
   useEffect(() => {
-    if (user) {
-      listTodos();
-    }
+    if (!user) return;
+    console.log("Setting up subscription for user:", user.signInDetails?.loginId);
+    
+    // Set up real-time subscription
+    const sub = client.models.Todo.observeQuery({
+      filter: {
+        user: {
+          eq: user.signInDetails?.loginId
+        }
+      }
+    }).subscribe({
+      next: ({ items, isSynced }) => {
+        console.log("Subscription update received:", { items, isSynced });
+        setTodos([...items]);
+        
+        // Initial load might not be synced, so refresh once synced
+        if (isSynced && items.length === 0) {
+          console.log("Synced but no items, refreshing...");
+          refreshTodos();
+        }
+      },
+      error: (error) => {
+        console.error("Subscription error:", error);
+      }
+    });
+    
+    // Initial fetch to ensure we have data
+    refreshTodos();
+    
+    // Return cleanup function to unsubscribe when component unmounts or user changes
+    return () => {
+      console.log("Cleaning up subscription");
+      sub.unsubscribe();
+    };
   }, [user]);
 
   function createTodo() {
@@ -57,9 +92,12 @@ function listTodos() {
       client.models.Todo.create({
         content: content,
         user: user.signInDetails?.loginId,
+        isDone: false,
       }).then((result) => {
         console.log("Todo created:", result);
         console.log("Created by user:", user?.signInDetails?.loginId);
+        // Explicitly refresh the list after creation
+        refreshTodos();
       }).catch((error) => {
         console.error("Error creating todo:", error);
       });
